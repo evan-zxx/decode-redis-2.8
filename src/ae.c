@@ -335,7 +335,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
         long now_sec, now_ms;
         long long id;
 
-        // 如果超过了最大 id，则跳过这个定时事件，为的是避免死循环。
+        // 如果超过了最大 id，则跳过这个定时事件，为的是避免死循环
         // 如果事件一执行的时候注册了事件二，事件一执行完毕后事件二得到执行，紧接着如果事件一有得到执行就会成为循环，因此维护了 timeEventNextId 。
         if (te->id > maxId) {
             te = te->next;
@@ -391,7 +391,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  * the events that's possible to process without to wait are processed.
  *
  * The function returns the number of events processed. */
-// 先处理定时事件，然后处理套接字事件
+// 先处理套接字事件 后处理timer事件
 int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 {
     int processed = 0, numevents;
@@ -415,7 +415,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
         if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
             shortest = aeSearchNearestTimer(eventLoop);
 
-        // 计算睡眠的最短时间
+        // 计算更新睡眠的最短时间
         if (shortest) { // 存在定时事件
             long now_sec, now_ms;
 
@@ -450,7 +450,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
         }
 
-        // 调用 IO 多路复用函数阻塞监听
+        // 调用 IO 多路复用函数阻塞监听 直到超时或者拿到事件返回
         numevents = aeApiPoll(eventLoop, tvp);
 
         // 处理已经触发的事件

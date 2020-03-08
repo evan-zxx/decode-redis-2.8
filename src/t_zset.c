@@ -104,40 +104,52 @@ int zslRandomLevel(void) {
     return (level<ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
 }
 
+// skipList中插入节点
+// https://www.cnblogs.com/gqtcgq/p/7247074.html
 zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
+    //update数组记录插入结点在每层上的前驱结点
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    //层跨度辅助数组 记录该结点在跳跃表中的排名 表头哑节点排名为0
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
     redisAssert(!isnan(score));
     x = zsl->header;
 
+    // 寻找插入结点在每层上的前驱结点
     // 遍历 skiplist 中所有的层，找到数据将要插入的位置，并保存在 update 中
+    // 从表头的最高节点开始查找 首先在该层中寻找插入节点的前驱
     for (i = zsl->level-1; i >= 0; i--) {
         /* store rank that is crossed to reach the insert position */
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
 
-        // 链表的搜索
         while (x->level[i].forward &&
+            // 只要插入结点比当前结点x在该层的后继结点x->level[i].forward要大
             (x->level[i].forward->score < score ||
+            // 当分数相同时, 比较成员对象的字典序 (redis允许分数重复, 但对象不能重复)
                 (x->level[i].forward->score == score &&
                 compareStringObjects(x->level[i].forward->obj,obj) < 0))) {
+            // 则首先记录x后继结点的排名：rank[i] += x->level[i].span
             rank[i] += x->level[i].span;
+            // 接着开始比较x的后继结点：x =x->level[i].forward
             x = x->level[i].forward;
         }
 
-        // update[i] 记录了新数据项的前驱
+        // 一旦当前结点x的后继结点为空，或者后继结点比插入结点要大，说明找到了插入结点在该层的前驱结点，记录到update数组中
+        // 此时rank[i]就是结点x的排名
+        // 然后跳到下一层 从x开始遍历
         update[i] = x;
     }
 
-    // random 一个 level，是随机的
+    // random 一个 level 是随机的 0-32之间 0-32
     /* we assume the key is not already inside, since we allow duplicated
      * scores, and the re-insertion of score and redis object should never
      * happen since the caller of zslInsert() should test in the hash table
      * if the element is already inside or not. */
     level = zslRandomLevel();
 
-    // random level 比原有的 zsl->level 大，需要增加 skiplist 的 level
+    // random level 比原有的 zsl->level大
+    // 则需要初始化插入结点在超出层上，也就是在层数范围为[zsl->level, level)上的前驱结点及其排名
     if (level > zsl->level) {
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
@@ -147,7 +159,10 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         zsl->level = level;
     }
 
-    // 插入
+    // 在跳跃表的插入操作中，无需判断插入结点是否与表中结点重复，
+    // 这是因为在调用zslInsert之前，调用者应该已经使用哈希表进行过检测了。
+
+    // 在层范围[0, level)中，根据update[i]记录的每层上的前驱结点，将新结点插入到每层中
     x = zslCreateNode(level,score,obj);
     for (i = 0; i < level; i++) {
         // 新节点项插到 update[i] 的后面
@@ -155,6 +170,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         update[i]->level[i].forward = x;
 
         /* update span covered by update[i] as x is inserted here */
+        // 节点的层跨度，等于该节点在第i层上的后继节点的排名，减去该节点的排名
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }

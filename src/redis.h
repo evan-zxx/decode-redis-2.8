@@ -286,7 +286,7 @@
 #define REDIS_NOTUSED(V) ((void) V)
 
 #define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^32 elements */
-#define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 */
+#define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 k+1层随机到的概率是k层的0.25倍  */
 
 /* Append only defines */
 #define AOF_FSYNC_NO 0
@@ -590,29 +590,31 @@ typedef struct zskiplistNode {
     // 节点数据
     robj *obj;
 
-    // 分数，游戏分数？按游戏分数排序
+    // 分值 排序的根据
     double score;
 
-    // 后驱指针
+    // 前继指针
     struct zskiplistNode *backward;
 
     // 后驱指针数组
     struct zskiplistLevel {
         struct zskiplistNode *forward;
 
-        // 调到下一个数据项需要走多少步
+        // 调到下一个数据项需要走多少步 用于计算当前节点的排名
         unsigned int span;
-    } level[];
+    } level[]; // 随机1~32层对应的软性数组
 } zskiplistNode;
 
+
+//调表结构
 typedef struct zskiplist {
-    // 跳表头尾指针
+    // 跳表头尾指针 注意头结点是哑节点 不包含实际节点数据 且层数固定为32(最大)
     struct zskiplistNode *header, *tail;
 
-    // 跳表的长度
+    // 跳表的长度 首节点到尾节点的长度
     unsigned long length;
 
-    // 跳表的高度
+    // 跳表的高度 表中最大层数(不包含哑头结点)
     int level;
 } zskiplist;
 

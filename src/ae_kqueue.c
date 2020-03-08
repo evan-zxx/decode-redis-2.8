@@ -32,6 +32,7 @@
 #include <sys/types.h>
 #include <sys/event.h>
 #include <sys/time.h>
+#include "ae.h"
 
 typedef struct aeApiState {
     int kqfd;
@@ -105,17 +106,19 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
 
+    // 根据时间设置kevent超时阻塞方式 timeout
     if (tvp != NULL) {
         struct timespec timeout;
         timeout.tv_sec = tvp->tv_sec;
         timeout.tv_nsec = tvp->tv_usec * 1000;
         retval = kevent(state->kqfd, NULL, 0, state->events, eventLoop->setsize,
                         &timeout);
-    } else {
+    } else { //一直阻塞?? 直到有事件返回
         retval = kevent(state->kqfd, NULL, 0, state->events, eventLoop->setsize,
                         NULL);
     }
 
+    // 有事件返回
     if (retval > 0) {
         int j;
         
@@ -126,6 +129,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             
             if (e->filter == EVFILT_READ) mask |= AE_READABLE;
             if (e->filter == EVFILT_WRITE) mask |= AE_WRITABLE;
+            // 放入事件触发结构中
             eventLoop->fired[j].fd = e->ident; 
             eventLoop->fired[j].mask = mask;           
         }

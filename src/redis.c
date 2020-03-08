@@ -1218,7 +1218,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (server.active_expire_enabled && server.masterhost == NULL)
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
-    // ？？？为什么要执行如下操作
+    // 尝试处理上次append未处理的命令
     /* Try to process pending commands for clients that were just unblocked. */
     while (listLength(server.unblocked_clients)) {
         // 取链表头部
@@ -1657,7 +1657,7 @@ void initServer() {
 
     // 初始化 redis 数据集
     /* Create the Redis databases, and initialize other internal state. */
-    for (j = 0; j < server.REDIS_DEFAULT_DBNUM; j++) { // 初始化多个数据库
+    for (j = 0; j < server.REDIS_DEFAULT_DBNUM; j++) { // 初始化多个数据库(默认16个库)
         // 哈希表，用于存储键值对
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         // 哈希表，用于存储每个键的过期时间
@@ -3164,6 +3164,8 @@ void redisSetProcTitle(char *title) {
 #endif
 }
 
+
+// 程序主函数
 int main(int argc, char **argv) {
     struct timeval tv;
 
@@ -3256,7 +3258,7 @@ int main(int argc, char **argv) {
         // 从配置文件中加载配置信息
         loadServerConfig(configfile,options);
 
-        // 释放内存。options 配置已经在上一句中保存
+        // 释放内存 options 配置已经在上一句中保存
         sdsfree(options);
 
         // 用绝对路径记录配置文件

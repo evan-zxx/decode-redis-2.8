@@ -161,7 +161,7 @@ void *bioProcessBackgroundJobs(void *arg) {
         listNode *ln;
 
         /* The loop always starts with the lock hold. */
-        // 如果任务队列为0，则等待
+        // 如果任务队列为0，则将自己挂起等待
         if (listLength(bio_jobs[type]) == 0) {
             // pthread_mutex_unlock(&bio_mutex[type]);
             pthread_cond_wait(&bio_condvar[type],&bio_mutex[type]);
