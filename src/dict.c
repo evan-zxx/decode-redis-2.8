@@ -204,6 +204,7 @@ int dictResize(dict *d)
     minimal = d->ht[0].used;
     if (minimal < DICT_HT_INITIAL_SIZE)
         minimal = DICT_HT_INITIAL_SIZE;
+    // 将hash表缩小到4
     return dictExpand(d, minimal);
 }
 
@@ -245,6 +246,25 @@ int dictExpand(dict *d, unsigned long size)
  * keys to move from the old to the new hash table, otherwise 0 is returned.
  * Note that a rehashing step consists in moving a bucket (that may have more
  * thank one key as we use chaining) from the old to the new hash table. */
+
+
+// 随着操作不断执行, 哈希表保存的键值对会逐渐增多或减少, 为了让哈希表的负载因子维持在一个合理的范围内, 当哈希表保存的键值对数量太大/太少会进行rehash
+// 1: 为字典的ht[1]哈希表分配空间, 大小取决于要进行的操作以及ht[0]当前包含的键值对数量
+// a: 如果扩展操作, 大小 >= ht[0].used*2的2次幂 b: 如果是收缩操作, 大小 >= ht[0].used的2次幂
+// 2: 将保存在ht[0]中的所有键值对rehash到ht[1]上面: 重新计算键的哈希值和索引 然后将放到ht[1]的指定位置
+// 3: 当ht[0]中键值全部转移到ht[1]上后, 释放ht[0]将ht[1]设置为ht[0]. 并建立新表 为下次作准备
+
+// 当满足一下条件中任一一个 会自动开始对哈希表进行扩展操作
+// a: 服务没后执行bgsave/bgsavewriteaof 且哈希表的负载因子>=1
+// b: 服务正在长执行bgsave/bgsavewriteaof 且哈希表负载因子>=5
+// 当负载因子小于0.1的时候进行收缩
+// 其中负载因子 load_factor = ht[0].used / ht[0].size
+
+// 服务在执行bgsave/bgsavewriteaof时, redis要创建子进程, 而大多数系统采用写时拷贝 所以在子进程存在期间, 服务器会提高执行扩展所需操作的负载因子
+// 从而避免在子进程存在期间进行哈希表的扩展, 避免不必要的内存写入操作, 最大的限度节省内存
+
+// 为了避免rehash对服务造成影响(键值对很多的时候) redis采用渐进式rehash
+
 int dictRehash(dict *d, int n) {
     // 重置哈希表结束，直接返回
     if (!dictIsRehashing(d)) return 0;
@@ -252,8 +272,7 @@ int dictRehash(dict *d, int n) {
     while(n--) {
         dictEntry *de, *nextde;
 
-        // 第一个哈希表为空，证明重置哈希表已经完成，将第二个哈希表赋值给第一个，
-        // 结束
+        // 第一个哈希表为空，证明重置哈希表已经完成，将第二个哈希表赋值给第一个 结束
         /* Check if we already rehashed the whole table... */
         if (d->ht[0].used == 0) {
             zfree(d->ht[0].table);
@@ -265,6 +284,9 @@ int dictRehash(dict *d, int n) {
 
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
+        // 当前rehash进度还没完成 渐进式rehash
+        // 当渐进式rehash时, 会同时存在ht[0]和ht[1]在使用
+        // 对已有键进行操作时, 是先找ht[0] 找不到再找ht[1] 但是新增的键会直接放在ht[1]中 保证ht[0]一直在减少 知道完成渐进式rehash
         assert(d->ht[0].size > (unsigned)d->rehashidx);
 
         // 找到哈希表中不为空的位置
@@ -278,7 +300,7 @@ int dictRehash(dict *d, int n) {
             nextde = de->next;
 
             /* Get the index in the new hash table */
-            // 计算哈希值
+            // 根据hash值计算index索引
             h = dictHashKey(d, de->key) & d->ht[1].sizemask;
 
             // 头插法
@@ -312,6 +334,7 @@ int dictRehashMilliseconds(dict *d, int ms) {
     long long start = timeInMilliseconds();
     int rehashes = 0;
 
+    // 每次进行100个rehash
     while(dictRehash(d,100)) {
         rehashes += 100;
         if (timeInMilliseconds()-start > ms) break;
@@ -371,7 +394,9 @@ dictEntry *dictAddRaw(dict *d, void *key)
     // 如果正在重置哈希表，则执行单步的重置哈希表
     if (dictIsRehashing(d)) _dictRehashStep(d);
 
-    // 获取该键在哈希表中的位置
+    // 获取该键在哈希表中的index 并且在需要扩容的时候进行扩容
+    // 因为容量在准备要扩容的时候已经不够了 所以在这里检查是否要扩容
+    // 缩容的操作直接在serverCron中检测 因为相对没那么立即需要
     /* Get the index of the new element, or -1 if
      * the element already exists. */
     if ((index = _dictKeyIndex(d, key)) == -1)
@@ -916,6 +941,7 @@ unsigned long dictScan(dict *d,
 
 
 /* Expand the hash table if needed */
+// 扩容hash表
 static int _dictExpandIfNeeded(dict *d)
 {
     // 正在重置哈希表，说明哈希表已经扩增
@@ -933,12 +959,14 @@ static int _dictExpandIfNeeded(dict *d)
         (dict_can_resize ||
          d->ht[0].used/d->ht[0].size > dict_force_resize_ratio))
     {
+        // 扩容到2倍
         return dictExpand(d, d->ht[0].used*2);
     }
     return DICT_OK;
 }
 
 /* Our hash table capability is a power of two */
+// 计算需要rehash后的新的哈希表空间大小
 static unsigned long _dictNextPower(unsigned long size)
 {
     unsigned long i = DICT_HT_INITIAL_SIZE;

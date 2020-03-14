@@ -44,6 +44,7 @@
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
 
+// 每个此结构保存着一个键值对
 typedef struct dictEntry {
     // 键
     void *key;
@@ -60,7 +61,7 @@ typedef struct dictEntry {
         int64_t s64;
     } v;
 
-    // 相当于链表的 next
+    // 指向下个哈希节点的指针 将多个哈希值相同的键值对链接在一起 以此来解决键冲突
     struct dictEntry *next;
 } dictEntry;
 
@@ -84,33 +85,44 @@ typedef struct dictType {
     void (*valDestructor)(void *privdata, void *obj);
 } dictType;
 
+
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
+// 哈希表 字典中使用的
 typedef struct dictht {
-    // 两个哈希表
+    // 哈希表数组 每个元素都指向dictEntry 即每个dictEntry都代表一个键值对
     dictEntry **table;
 
-    // 哈希表的大小
+    // 哈希表的大小 table其中存储dictEntry的数量
     unsigned long size;
 
-    // 哈希表大小掩码
+    // 哈希表大小掩码 用于计算索引值
+    // 总是等于size-1 这个属性和哈希值一起决定了一个键应该被放到table数据的哪个索引上面
+    // index = hash & ht[0].sizemask    hash为根据键做哈希函数(murmurHash2函数)计算出的hash值 index为table数组的下标
     unsigned long sizemask;
 
     // 哈希表中数据项数量
     unsigned long used;
 } dictht;
 
-// 哈希表（字典）数据结构，redis 的所有键值对都会存储在这里
+
+
+// 字典 数据结构，redis 的所有键值对都会存储在这里
+// 当要将一个新的键值添加到字典里面时, 先根据键值对的键计算出哈希值和索引值, 然后再根据索引值,
+// 将包含新键值对的哈希表节点放到哈希表数组的指定索引上面;
+// 1: hash = dict->type->hashFunction(key)  当被用作数据库底层实现/哈希键的底层实现MurmurHash2算法来计算hash
+// 2: index = hash & dict->ht[x].sizemask index是dictht->table中的下标
 typedef struct dict {
-    // 哈希表的类型，包括哈希函数，比较函数，键值的内存释放函数
+    // 哈希表的类型特定函数，包括哈希函数，比较函数，键值的内存释放函数
     dictType *type;
 
-    // 存储一些额外的数据
+    // 存储一些额外的私有数据
     void *privdata;
 
-    // 两个哈希表
+    // 2个哈希表, 一般只使用ht[0]哈希表, ht[1]只会在对ht[0]哈希表进行rehash时使用
     dictht ht[2];
 
+    // rehash索引 记录了当前rehash的进度 当rehash不再进行时 值为-1
     // 哈希表重置下标，指定的是哈希数组的数组下标
     int rehashidx; /* rehashing not in progress if rehashidx == -1 */
 
@@ -208,6 +220,8 @@ unsigned int dictGenCaseHashFunction(const unsigned char *buf, int len);
 void dictEmpty(dict *d, void(callback)(void*));
 void dictEnableResize(void);
 void dictDisableResize(void);
+
+
 int dictRehash(dict *d, int n);
 int dictRehashMilliseconds(dict *d, int ms);
 void dictSetHashFunctionSeed(unsigned int initval);

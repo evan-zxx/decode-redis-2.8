@@ -763,7 +763,7 @@ void propagateExpire(redisDb *db, robj *key) {
     decrRefCount(argv[1]);
 }
 
-// 如果键值对过期，舍弃
+// 惰性键删除 如果键值对过期 则删除
 int expireIfNeeded(redisDb *db, robj *key) {
     long long when = getExpire(db,key);
 

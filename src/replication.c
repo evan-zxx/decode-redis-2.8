@@ -816,7 +816,7 @@ void sendBulkToSlave(aeEventLoop *el, int fd, void *privdata, int mask) {
 }
 
 // 当 RDB 持久化(backgroundSaveDoneHandler())结束后，会调用此函数
-// 给所有的从机发送 RDB 文件
+// 给所有的从库发送 RDB 文件
 /* This function is called at the end of every background saving.
  * The argument bgsaveerr is REDIS_OK if the background saving succeeded
  * otherwise REDIS_ERR is passed to the function.
@@ -1861,7 +1861,7 @@ int replicationScriptCacheExists(sds sha1) {
     return dictFind(server.repl_scriptcache_dict,sha1) != NULL;
 }
 
-// 管理主从连接的定时程序定时程序，每秒执行一次
+// 管理主从连接的定时程序定时程序，每1秒执行一次
 // 在 serverCorn() 中调用
 /* --------------------------- REPLICATION CRON  ----------------------------- */
 

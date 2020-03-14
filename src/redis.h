@@ -74,7 +74,7 @@
 #define REDIS_MAXIDLETIME       0       /* default client timeout: infinite */
 #define REDIS_DEFAULT_DBNUM     16
 #define REDIS_CONFIGLINE_MAX    1024
-#define REDIS_DBCRON_DBS_PER_CALL 16
+#define REDIS_DBCRON_DBS_PER_CALL 16  // 定期删除策略每次检查的数据库个数
 #define REDIS_MAX_WRITE_PER_EVENT (1024*64)
 #define REDIS_SHARED_SELECT_CMDS 10
 #define REDIS_SHARED_INTEGERS 10000
@@ -148,18 +148,18 @@
 
 /* Command flags. Please check the command table defined in the redis.c file
  * for more information about the meaning of every flag. */
-#define REDIS_CMD_WRITE 1                   /* "w" flag */
-#define REDIS_CMD_READONLY 2                /* "r" flag */
-#define REDIS_CMD_DENYOOM 4                 /* "m" flag */
+#define REDIS_CMD_WRITE 1                   /* "w" flag */  // 写入命令
+#define REDIS_CMD_READONLY 2                /* "r" flag */  // 只读命令
+#define REDIS_CMD_DENYOOM 4                 /* "m" flag */  // 会占用大量内存的命令 执行之前要检查内存, 如果内存紧张则不允许执行
 #define REDIS_CMD_NOT_USED_1 8              /* no longer used flag */
-#define REDIS_CMD_ADMIN 16                  /* "a" flag */
-#define REDIS_CMD_PUBSUB 32                 /* "p" flag */
-#define REDIS_CMD_NOSCRIPT  64              /* "s" flag */
-#define REDIS_CMD_RANDOM 128                /* "R" flag */
-#define REDIS_CMD_SORT_FOR_SCRIPT 256       /* "S" flag */
-#define REDIS_CMD_LOADING 512               /* "l" flag */
-#define REDIS_CMD_STALE 1024                /* "t" flag */
-#define REDIS_CMD_SKIP_MONITOR 2048         /* "M" flag */
+#define REDIS_CMD_ADMIN 16                  /* "a" flag */  // 管理命令 SAVE/BGSAVE/SHOUTDOWN等
+#define REDIS_CMD_PUBSUB 32                 /* "p" flag */  // 发布订阅相关的命令
+#define REDIS_CMD_NOSCRIPT  64              /* "s" flag */  // 不可以在Lua脚本中使用的命令
+#define REDIS_CMD_RANDOM 128                /* "R" flag */  // 随机的命令 对相同的数据集和参数结构可能不同SPOP/RANDOMKEY..
+#define REDIS_CMD_SORT_FOR_SCRIPT 256       /* "S" flag */  // 当在lua中使用该命令时 会对结果进行一次排序 使得命令的结果有序SINTER..
+#define REDIS_CMD_LOADING 512               /* "l" flag */  // 可以在服务器载入数据镜像过程中使用 INFO..
+#define REDIS_CMD_STALE 1024                /* "t" flag */  // 允许从库带有过期数据时使用的命令 SLAVEOF/PING/PONG..
+#define REDIS_CMD_SKIP_MONITOR 2048         /* "M" flag */  // 这个命令在监视器模式下 不会被自动传播
 
 /* Object types */
 #define REDIS_STRING 0
@@ -288,10 +288,10 @@
 #define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^32 elements */
 #define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 k+1层随机到的概率是k层的0.25倍  */
 
-/* Append only defines */
-#define AOF_FSYNC_NO 0
-#define AOF_FSYNC_ALWAYS 1
-#define AOF_FSYNC_EVERYSEC 2
+/* Append only defines */     // aof文件的写入和同步: 系统调用write()也会将数据暂时放在内核缓冲区, 等必要时才会写入磁盘, 这样机器宕机内存数据就会丢失 fsync/fdatasync可以强制同步
+#define AOF_FSYNC_NO 0        // 将aof_buf缓冲区中数据写入aof文件中, 但不会对aof文件进行同步, 何时同步取决于操作系统(丢失数据取决于操作系统)
+#define AOF_FSYNC_ALWAYS 1    // 总是将缓冲区数据写入文件并且立刻同步(可能丢失一个时间循环的数据)
+#define AOF_FSYNC_EVERYSEC 2  // 缓冲区数据写入aof文件 每秒间隔都同步该文件 另外的线程专门负责(可能丢失一秒的数据)
 #define REDIS_DEFAULT_AOF_FSYNC AOF_FSYNC_EVERYSEC
 
 /* Zip structure related defaults */
@@ -373,13 +373,14 @@
 
 /* A redis object, that is a type able to hold a string / list / set */
 
+// 每当我们在redis数据库中新创建一个键值对时, 我们至少会创建两个对象, 键对象和值对象
+// redis 中的每个对象都是由一个redisObject结构组成
 /* The actual Redis Object */
 #define REDIS_LRU_CLOCK_MAX ((1<<21)-1) /* Max value of obj->lru */
 #define REDIS_LRU_CLOCK_RESOLUTION 10 /* LRU clock resolution in seconds */
 typedef struct redisObject {
     // 刚刚好 32 bits
-
-    // 对象的类型，字符串/列表/集合/哈希表
+    // 对象的类型 字符串/列表/集合/有序集合/哈希表
     unsigned type:4;
 
     // 未使用的两个位
@@ -387,15 +388,17 @@ typedef struct redisObject {
 
     // 编码的方式，redis 为了节省空间，提供多种方式来保存一个数据
     // 譬如：“123456789” 会被存储为整数 123456789
+    // long类型整数/embstr编码字符串SDS/简单动态字符串/字典/双端链表/压缩列表/整数集合/跳跃表和字典
+    // 每种类型的对象都至少使用了两种不同的编码 例如
     unsigned encoding:4;
 
-    // 当内存紧张，淘汰数据的时候用到
+    // 空转时长, 当内存紧张，淘汰数据的时候用到
     unsigned lru:22;        /* lru time (relative to server.lruclock) */
 
     // 引用计数
     int refcount;
 
-    // 数据指针
+    // 数据指针 指向底层实现数据结构的指针
     void *ptr;
 } robj;
 
@@ -412,7 +415,9 @@ typedef struct redisObject {
 
 // redis 数据集数据结构
 typedef struct redisDb {
+    // 数据库键值空间 保存数据库中所有键值对
     dict *dict;                 /* The keyspace for this DB */
+    // 数据库中所有键的过期时间
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
     dict *ready_keys;           /* Blocked keys that received a PUSH */
@@ -476,9 +481,10 @@ typedef struct readyList {
 /* With multiplexing we need to take per-client state.
  * Clients are taken in a liked list. */
 typedef struct redisClient {
-    // 连接的套接字
+    // 连接的套接字 fake clinet fd=-1(用于处理aof/lua脚本)
     int fd;
 
+    // 当前指向的目标数据库
     redisDb *db;
 
     // 数据库序号上下文？？？
@@ -486,13 +492,14 @@ typedef struct redisClient {
 
     // 客户端名称，可以被设置
     robj *name;             /* As set by CLIENT SETNAME */
+    // 输入缓冲区 空间大小自适应 但最大不超过1G 否则该链接会被关闭
     sds querybuf;
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size */
 
     // 参数个数
     int argc;
 
-    // 参数
+    // 命令参数(与querybuf中数据对应)
     robj **argv;
 
     // 命令对应的执行函数。在解析命令的时候会被赋值
@@ -500,10 +507,12 @@ typedef struct redisClient {
 
     // 请求命令的类型
     int reqtype;
+    // 记录长在解析的一条完整的请求中, 尚未处理的命令参数 如果为0 说明当前要解析命令头 格式为"*<n>\r\n
     int multibulklen;       /* number of multi bulk arguments left to read */
+    // 记录接下来要解析的命令请求行中，包含的字符串的长度 如果c->bulklen为-1，说明当前要解析的，是字符串的长度行，格式为"$<n>\r\n"
     long bulklen;           /* length of bulk argument in multi bulk request */
 
-    // 回复数据、
+    // 可变大小的输出缓冲区
     list *reply;
     // 统计回复列表中数据所占字节数
     unsigned long reply_bytes; /* Tot bytes of objects in reply list */
@@ -512,10 +521,12 @@ typedef struct redisClient {
 
     // 客户端创建时间
     time_t ctime;           /* Client creation time */
+    // client最后一次和服务交互的时间 可用来计算客户端的空转时间 当空转时间超过timeout 就会被断开连接
     time_t lastinteraction; /* time of the last interaction, used for timeout */
+    // 记录输出缓冲区第一次到达性能软性限制的时间
     time_t obuf_soft_limit_reached_time;
 
-    // 客户端类型
+    // 客户当前类型标识 主/从/lua/multi/集群模式等..
     int flags;              /* REDIS_SLAVE | REDIS_MONITOR | REDIS_MULTI ... */
 
     // 是否已经认证
@@ -524,13 +535,13 @@ typedef struct redisClient {
     // 和从机连接的状态
     int replstate;          /* replication state if this is a slave */
 
-    // RDB 文件描述符
+    // replication 文件描述符
     int repldbfd;           /* replication DB file descriptor */
 
-    // RDB 文件偏移
+    // replication 文件偏移
     off_t repldboff;        /* replication DB file offset */
 
-    // RDB 文件大小
+    // replication 文件大小
     off_t repldbsize;       /* replication DB file size */
 
     long long reploff;      /* replication offset if this is our master */
@@ -557,9 +568,9 @@ typedef struct redisClient {
     // 这个参数几乎只用来维护客户端订阅了多少模式这个数据
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
 
-    // 回复缓存？？？ 和 reply 有什么不同？？？
+    // 固定输出缓冲区 保存内容较小的数据
     /* Response buffer */
-    int bufpos;
+    int bufpos; //记录buf中已使用的字节数
     char buf[REDIS_REPLY_CHUNK_BYTES];
 } redisClient;
 
@@ -593,20 +604,21 @@ typedef struct zskiplistNode {
     // 分值 排序的根据
     double score;
 
-    // 前继指针
+    // 前继指针(后退指针)
     struct zskiplistNode *backward;
 
     // 后驱指针数组
     struct zskiplistLevel {
+        // 后继指针(前进指针) 用于访问表尾方向的其他节点
         struct zskiplistNode *forward;
 
-        // 调到下一个数据项需要走多少步 用于计算当前节点的排名
+        // 前进指针所指的节点和当前节点的距离 用于计算当前节点的排名
         unsigned int span;
     } level[]; // 随机1~32层对应的软性数组
 } zskiplistNode;
 
 
-//调表结构
+// 跳表结构
 typedef struct zskiplist {
     // 跳表头尾指针 注意头结点是哑节点 不包含实际节点数据 且层数固定为32(最大)
     struct zskiplistNode *header, *tail;
@@ -671,7 +683,7 @@ struct redisServer {
     // redis 服务器定时程序执行频率
     int hz;                     /* serverCron() calls frequency in hertz */
 
-    // redis 数据库，很有意思
+    // redis 数据库数组，保存着服务器中所有数据库, 很有意思
     redisDb *db;
 
     // 命令表
@@ -679,9 +691,11 @@ struct redisServer {
     dict *orig_commands;        /* Command table before command renaming. */
 
     // 事件中心
-    aeEventLoop *el;
+    aeEventLoop *el
+    // 默认每10s更新一次 用于计算键的空转时间 该lruclock - 键中的lru时间就是键的空转时间
     unsigned lruclock:22;       /* Clock incrementing every minute, for LRU */
     unsigned lruclock_padding:10;
+    // 关闭服务器的标识 1:关闭 0:不做动作
     int shutdown_asap;          /* SHUTDOWN needed ASAP */
     int activerehashing;        /* Incremental rehash in serverCron() */
     char *requirepass;          /* Pass for AUTH command, or NULL */
@@ -771,13 +785,19 @@ struct redisServer {
     int aof_fsync;                  /* Kind of fsync() policy */
     char *aof_filename;             /* Name of the AOF file */
     int aof_no_fsync_on_rewrite;    /* Don't fsync if a rewrite is in prog. */
+    // aof重写触发的容量触发条件
     int aof_rewrite_perc;           /* Rewrite AOF if % growth is > M and... */
     off_t aof_rewrite_min_size;     /* the AOF file is at least N bytes. */
     off_t aof_rewrite_base_size;    /* AOF size on latest startup or rewrite. */
     off_t aof_current_size;         /* AOF current size. */
+    // 如果为1 则raof任务被延迟了(上次raof的时候后台在bgsave)
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
+    // raof子进程id !=-1则正在进行raof
     pid_t aof_child_pid;            /* PID if rewriting process */
+    // aof 重写缓冲区 在aof后台重写期间 处理的指令会同时吸入aof缓冲区 和 aof重写缓冲区
+    // 当aof重写完成时, 会将此aof重写缓冲区刷到新的aof文件中
     list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
+    // aof缓冲区
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
     int aof_selected_db; /* Currently selected DB in AOF */
@@ -790,20 +810,24 @@ struct redisServer {
     int aof_rewrite_incremental_fsync;/* fsync incrementally while rewriting? */
 
     /* RDB persistence */
+    // 上次rdb(save/bgsave)之后服务器对整个数据库进行多少次修改
     long long dirty;                /* Changes to DB from the last save */
     long long dirty_before_bgsave;  /* Used to restore dirty on failed BGSAVE */
+    // bgsave 子进程id !=-1则正在bgsave
     pid_t rdb_child_pid;            /* PID of RDB saving child */
+    // 触发RDB的条件
     struct saveparam *saveparams;   /* Save points array for RDB */
     int saveparamslen;              /* Number of saving points */
     char *rdb_filename;             /* Name of RDB file */
     int rdb_compression;            /* Use compression in RDB? */
     int rdb_checksum;               /* Use RDB checksum? */
+    // 上次成功执行save/bgsave的时间戳
     time_t lastsave;                /* Unix time of last successful save */
     time_t lastbgsave_try;          /* Unix time of last attempted bgsave */
     time_t rdb_save_time_last;      /* Time used by last RDB save run. */
     time_t rdb_save_time_start;     /* Current RDB save start time. */
     int lastbgsave_status;          /* REDIS_OK or REDIS_ERR */
-    int stop_writes_on_bgsave_err;  /* Don't allow writes if can't BGSAVE */
+    int stop_writes_on_bgsave_err;  /* Don't allow writes if can't BGSAVE or BGSAVE ERR */
     /* Propagation of commands in AOF / replication */
     redisOpArray also_propagate;    /* Additional command to propagate. */
 
@@ -932,8 +956,9 @@ struct redisServer {
     size_t set_max_intset_entries;
     size_t zset_max_ziplist_entries;
     size_t zset_max_ziplist_value;
-    // 时间，在每一次 serverCron() 定时程序中都会更新
+    // 时间，在每一次 serverCron() 定时程序中都会更新 秒级精确unix时间戳
     time_t unixtime;        /* Unix time sampled every cron cycle. */
+    // 微妙级精确度
     long long mstime;       /* Like 'unixtime' but with milliseconds resolution. */
 
     /* Pubsub */

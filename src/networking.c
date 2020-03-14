@@ -130,7 +130,9 @@ redisClient *createClient(int fd) {
  * data to the clients output buffers. If the function returns REDIS_ERR no
  * data should be appended to the output buffers. */
 int prepareClientToWrite(redisClient *c) {
+    // lua
     if (c->flags & REDIS_LUA_CLIENT) return REDIS_OK;
+    // master节点且没有设置REDIS_MASTER_FORCE_REPLY
     if ((c->flags & REDIS_MASTER) &&
         !(c->flags & REDIS_MASTER_FORCE_REPLY)) return REDIS_ERR;
 
@@ -287,7 +289,10 @@ void _addReplyStringToList(redisClient *c, char *s, size_t len) {
 
 void addReply(redisClient *c, robj *obj) {
     // prepareClientToWrite() 向事件中心注册写事件，响应函数为 sendReplyToClient()
-    // 待下面的操作结束后，会再一次进入事件中心，写事件将会被激活。
+    // 待下面的操作结束后，会再一次进入事件中心，写事件将会被激活
+    // prepareClientToWrite 返回REDIS_OK 表明当前replay需要向输出缓冲区中写数据
+    // 返回 != REDIS_OK 表明不需要 比如加载AOF的伪客户端
+    // 当为lua客户端时 直接返回REDIS_OK 且不需要注册写事件
     if (prepareClientToWrite(c) != REDIS_OK) return;
 
     /* This is an important place where we can avoid copy-on-write
@@ -812,7 +817,7 @@ void freeClientsInAsyncFreeQueue(void) {
     }
 }
 
-// 作为回调函数，将客户端中的回复数据发送给客户端
+// 作为回调函数，将客户端的发送缓冲区中的数据发送给客户端
 void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     redisClient *c = privdata;
     int nwritten = 0, totwritten = 0, objlen;
@@ -821,21 +826,26 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(mask);
 
+    // 当前发送缓冲区中有数据要发送
     while(c->bufpos > 0 || listLength(c->reply)) {
+        // 当前的client 固定发送缓冲区中有使用数据
         if (c->bufpos > 0) {
+            // 将buf中的剩余c->bufpos- c->sentlen长的数据发送出去
             nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
-            // 写完了
+            // TCP栈的发送缓冲区没有空间 或者发生了错误 直接跳出循环
             if (nwritten <= 0) break;
             c->sentlen += nwritten;
+            // 当前已经发送的数据量
             totwritten += nwritten;
 
             /* If the buffer was sent, set bufpos to zero to continue with
              * the remainder of the reply. */
+            // 如果数据已经全部发送完 则重置buf
             if (c->sentlen == c->bufpos) {
                 c->bufpos = 0;
                 c->sentlen = 0;
             }
-        } else {
+        } else { //当前使用c->reply大发送缓冲区
             // 取下回复列表中的节点
             o = listNodeValue(listFirst(c->reply));
             objlen = sdslen(o->ptr);
@@ -867,7 +877,8 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
          *
          * However if we are over the maxmemory limit we ignore that and
          * just deliver as much data as it is possible to deliver. */
-         // 每次回复有大小限制
+        // 当已经发送的数据很大时 > 64K 并且在没设置最大内存限制，或者尚未超过设置的最大内存限制的条件下，直接退出循环，停止发送
+        // 因为一直发送大量数据会占用过长事件的时间 影响其他任务 虽然这里fd是非阻塞接口?
         if (totwritten > REDIS_MAX_WRITE_PER_EVENT &&
             (server.maxmemory == 0 ||
              zmalloc_used_memory() < server.maxmemory)) break;
@@ -875,6 +886,7 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     // 错误处理
     if (nwritten == -1) {
+        // tcp发送缓冲区没有空间
         if (errno == EAGAIN) {
             nwritten = 0;
         } else {
@@ -893,11 +905,12 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         if (!(c->flags & REDIS_MASTER)) c->lastinteraction = server.unixtime;
     }
 
-    // 如果回复数据已经全部发送，卸载写事件
+    // 如果回复数据已经全部发送，删除之前注册的可写时间
     if (c->bufpos == 0 && listLength(c->reply) == 0) {
         c->sentlen = 0;
         aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
 
+        // 如果设置了REDIS_CLOSE_AFTER_REPLY 则直接断开连接
         /* Close connection after entire reply has been sent. */
         if (c->flags & REDIS_CLOSE_AFTER_REPLY) freeClient(c);
     }
@@ -913,6 +926,7 @@ void resetClient(redisClient *c) {
     if (!(c->flags & REDIS_MULTI)) c->flags &= (~REDIS_ASKING);
 }
 
+// 解析单行命令
 int processInlineBuffer(redisClient *c) {
     char *newline;
     int argc, j;
@@ -987,6 +1001,9 @@ static void setProtocolError(redisClient *c, int pos) {
     sdsrange(c->querybuf,pos,-1);
 }
 
+
+// processMultibulkBuffer就是主要的解析buffer中的内容 将解析出的命令和参数放入对应argv中
+// 对于set a 1这条命令，server端收到的内容应该是: *3\r\n$3\r\nset\r\n$1\r\na\r\n$1\r\n1\r\n：
 int processMultibulkBuffer(redisClient *c) {
     char *newline = NULL;
     int pos = 0, ok;
@@ -1135,35 +1152,23 @@ void processInputBuffer(redisClient *c) {
          * this flag has been set (i.e. don't process more commands). */
         if (c->flags & REDIS_CLOSE_AFTER_REPLY) return;
 
-        // 1）普通命令：set name Jhon
-        // 2）AOF 命令：
-        //         $3
-        //         *3
-        //         SET
-        //         *4
-        //         name
-        //         *4
-        //         Jhon
-
         // 请求的类型，处理的过程不一样
         /* Determine request type when unknown. */
         if (!c->reqtype) {
-            // 1）收到数据第一个字符为 *，表示接受到的数据为 AOF 命令
+            // 1）收到数据第一个字符为 *，表示接受到的数据多行请求
             if (c->querybuf[0] == '*') {
                 c->reqtype = REDIS_REQ_MULTIBULK;
 
-            // 2）普通的命令
+            // 2）单行请求
             } else {
                 c->reqtype = REDIS_REQ_INLINE;
             }
         }
 
-        // 两种请求类型，分开整理（普通命令和 AOF 命令）
+        // 解析单行请求
         if (c->reqtype == REDIS_REQ_INLINE) {
-            // 普通命令
             if (processInlineBuffer(c) != REDIS_OK) break;
-
-            // AOF 命令，会将 AOF 转化为普通命令
+            // 解析多行请求
         } else if (c->reqtype == REDIS_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != REDIS_OK) break;
         } else {
@@ -1183,6 +1188,7 @@ void processInputBuffer(redisClient *c) {
     }
 }
 
+// 处理clinet发送的请求
 void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     redisClient *c = (redisClient*) privdata;
     int nread, readlen;
@@ -1207,10 +1213,12 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 
     qblen = sdslen(c->querybuf);
+    // 记录输出缓冲区的大小峰值
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
+    // 为读准备空间
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
 
-    // 开始读
+    // 将fd中的数据读到输入缓冲区的querybuf+qblen位置 最多读readlen
     nread = read(fd, c->querybuf+qblen, readlen);
 
     // 错误
@@ -1223,7 +1231,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
 
-    // 没有读到任何东西，连接结束
+    // fd读到0 说明client tcp断开了
     } else if (nread == 0) {
         redisLog(REDIS_VERBOSE, "Client closed connection");
         freeClient(c);
@@ -1232,7 +1240,9 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     // 从套接字读到有数据
     if (nread) {
+        // 扩容sds为下一次读做准备
         sdsIncrLen(c->querybuf,nread);
+        // 更新交互时间
         c->lastinteraction = server.unixtime;
         if (c->flags & REDIS_MASTER) c->reploff += nread;
     } else {

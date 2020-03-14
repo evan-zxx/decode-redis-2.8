@@ -31,10 +31,9 @@
 #ifndef __ADLIST_H__
 #define __ADLIST_H__
 
-// 双链表的定义
-
 /* Node, List, and Iterator are the only data structures used currently. */
 
+// 双端链表节点的定义
 typedef struct listNode {
     struct listNode *prev;
     struct listNode *next;
@@ -46,14 +45,20 @@ typedef struct listIter {
     int direction;
 } listIter;
 
+
+// 双端链表
+// 无环: 表头节点的prev指针和尾结点的next都指向null, 对链表访问以null结尾
+// 带表头和表尾指针
+// 带链表长度计数器
+// 多态: 节点使用void*指针来保存节点值
 typedef struct list {
-    // 头指针
+    // 表头指针
     listNode *head;
 
-    // 尾指针
+    // 表尾指针
     listNode *tail;
 
-    // 数据拷贝函数指针
+    // 节点数据拷贝函数指针
     void *(*dup)(void *ptr);
 
     // 析构函数指针

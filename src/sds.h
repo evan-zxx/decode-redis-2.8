@@ -40,10 +40,16 @@ typedef char *sds;
 
 // 有关特地在结构体里添加占位符的技巧贴：
 // http://stackoverflow.com/questions/20443099/why-char-buf-instead-of-char-buf-in-rediss-sdahdr-struct
+// C字符串使用N+1空间来存储N个字符串以及'\0', 并不能满足redis对于其安全/效率/功能的需求
+// 1: 0(1)读取长度 len
+// 2: 杜绝缓冲区溢出  free
+// 3: 减少修改串时带来的内存重新分配(操作频繁) 空间预分配 惰性释放
+// 4: 二进制安全 会以二进制的方式来处理SDS里的数据 程序不会对数据做出任何限制, 过滤, 假设, 写的什么读的什么 用Len来判断串是否结束
+// 5: 兼容部分C字符串函数
 struct sdshdr {
-    int len;
-    int free;
-    char buf[];
+    int len;     // 记录buffer数组中已使用字节的数量 等于字符串的长度(常数级别获取而不是O(n))
+    int free;    // 记录buf数组中未使用的字节数量 杜绝缓冲区溢出的可能性, 操作之前会先检查空间是否足够, 若不够会自动将空间增大到需要
+    char buf[];  // 字节数组 用于保存字符串/二进制任何 末尾最后一个字节同样会有'\0', 且不会计算在len属性里面, 这样SDS就可以使用库函数来操作自己
 };
 
 // 返回 sdshdr.len

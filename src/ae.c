@@ -62,6 +62,7 @@
     #endif
 #endif
 
+// 创建event loop
 aeEventLoop *aeCreateEventLoop(int setsize) {
     aeEventLoop *eventLoop;
     int i;
@@ -150,6 +151,7 @@ void aeStop(aeEventLoop *eventLoop) {
     eventLoop->stop = 1;
 }
 
+// 将fd加入事件中
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
@@ -521,6 +523,7 @@ void aeMain(aeEventLoop *eventLoop) {
     }
 }
 
+// epoll/select/kqueue
 char *aeGetApiName(void) {
     return aeApiName();
 }

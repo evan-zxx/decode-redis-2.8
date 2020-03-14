@@ -924,7 +924,7 @@ int rewriteHashObject(rio *r, robj *key, robj *o) {
     return 1;
 }
 
-// AOF 持久化主函数。只在 rewriteAppendOnlyFileBackground() 中会调用此函数
+// aof文件重写主函数。只在 rewriteAppendOnlyFileBackground() 中会调用此函数
 /* Write a sequence of commands able to fully rebuild the dataset into
  * "filename". Used both by REWRITEAOF and BGREWRITEAOF.
  *
@@ -945,7 +945,7 @@ int rewriteAppendOnlyFile(char *filename) {
      * one used by rewriteAppendOnlyFileBackground() function. */
     snprintf(tmpfile,256,"temp-rewriteaof-%d.aof", (int) getpid());
 
-    // 打开文件
+    // 打开aof重写文件
     fp = fopen(tmpfile,"w");
     if (!fp) {
         redisLog(REDIS_WARNING, "Opening the temp file for AOF rewrite in rewriteAppendOnlyFile(): %s", strerror(errno));
@@ -980,7 +980,8 @@ int rewriteAppendOnlyFile(char *filename) {
         // 写入数据集序号
         if (rioWriteBulkLongLong(&aof,j) == 0) goto werr;
 
-        // 写入数据集中每一个数据项
+        // 写入数据集中每一个数据项 是从当前的内存数据进行重写 而不是对现有的aof文件进行读取/分析
+        // 因为这样更加高效 只需要查看当前内存中的数据 然后用当下的数据(有可能aof需要记录很多条操作才能执行到当下的数据) 执行一次保存当前数据的命令就好
         /* Iterate this DB writing every entry */
         while((de = dictNext(di)) != NULL) {
             sds keystr;
@@ -1061,7 +1062,7 @@ werr:
     return REDIS_ERR;
 }
 
-// 启动后台子进程，执行 AOF 持久化操作。bgrewriteaofCommand()，startAppendOnly()，serverCron() 中会调用此函数
+// 启动后台子进程，执行AOF文件重写逻辑 bgrewriteaofCommand()，startAppendOnly()，serverCron() 中会调用此函数
 /* This is how rewriting of the append only file in background works:
  *
  * 1) The user calls BGREWRITEAOF
@@ -1082,6 +1083,7 @@ int rewriteAppendOnlyFileBackground(void) {
     if (server.aof_child_pid != -1) return REDIS_ERR;
 
     start = ustime();
+    // fork子进程进行重写
     if ((childpid = fork()) == 0) {
         char tmpfile[256];
 
@@ -1097,7 +1099,7 @@ int rewriteAppendOnlyFileBackground(void) {
         // 临时文件名
         snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
 
-        // 脏数据，其实就是子进程所消耗的内存大小
+        // 进行aof重写
         if (rewriteAppendOnlyFile(tmpfile) == REDIS_OK) {
             // 获取脏数据大小
             size_t private_dirty = zmalloc_get_private_dirty();
@@ -1123,7 +1125,7 @@ int rewriteAppendOnlyFileBackground(void) {
         }
         redisLog(REDIS_NOTICE,
             "Background append only file rewriting started by pid %d",childpid);
-        // AOF 已经开始执行，取消 AOF 计划
+        // AOF重写 已经开始执行，取消 AOF重写 计划
         server.aof_rewrite_scheduled = 0;
 
         // AOF 最近一次执行的起始时间
@@ -1148,12 +1150,15 @@ int rewriteAppendOnlyFileBackground(void) {
 
 // 用户指令
 void bgrewriteaofCommand(redisClient *c) {
+    // 正在执行raof时 不再接受raof命令
     if (server.aof_child_pid != -1) {
         addReplyError(c,"Background append only file rewriting already in progress");
     } else if (server.rdb_child_pid != -1) {
+        // 正在执行rdb时, 先将aof_rewrite_scheduled置1开启raof计划 等待下次serverCron开始raof
         server.aof_rewrite_scheduled = 1;
         addReplyStatus(c,"Background append only file rewriting scheduled");
     } else if (rewriteAppendOnlyFileBackground() == REDIS_OK) {
+        // 否则直接开始raof
         addReplyStatus(c,"Background append only file rewriting started");
     } else {
         addReply(c,shared.err);
@@ -1184,7 +1189,7 @@ void aofUpdateCurrentSize(void) {
     }
 }
 
-// 在 AOF 持久化结束后会执行这个函数， backgroundRewriteDoneHandler() 主要工作是将 server.aof_rewrite_buf_blocks，即 AOF 缓存写入文件
+// 在 RAOF 持久化结束后会执行这个函数， backgroundRewriteDoneHandler() 主要工作是将 server.aof_rewrite_buf_blocks，即 AOF 缓存写入文件
 /* A background append only file rewriting (BGREWRITEAOF) terminated its work.
  * Handle this. */
 void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
@@ -1210,7 +1215,7 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
             goto cleanup;
         }
 
-        // 将 AOF 缓存 server.aof_rewrite_buf_blocks 的 AOF 写入磁盘
+        // 将RAOF缓冲区中数据写入新的AOF server.aof_rewrite_buf_blocks 的 AOF 写入磁盘
         if (aofRewriteBufferWrite(newfd) == -1) {
             redisLog(REDIS_WARNING,
                 "Error trying to flush the parent diff to the rewritten AOF: %s", strerror(errno));
@@ -1282,7 +1287,7 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
             oldfd = server.aof_fd;
             server.aof_fd = newfd;
 
-            // 有两种同步磁盘的策略：一种是立即执行同步磁盘，另一种是交由后台任务完成
+            // 有两种同步磁盘的策略：一种是立即执行同步磁盘，另一种是交由后台任务每秒同步一次完成
             if (server.aof_fsync == AOF_FSYNC_ALWAYS)
                 aof_fsync(newfd);
             else if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
